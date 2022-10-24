@@ -1,54 +1,102 @@
-/*
-  Blink
-
-  Turns an LED on for one second, then off for one second, repeatedly.
-
-  Most Arduinos have an on-board LED you can control. On the UNO, MEGA and ZERO
-  it is attached to digital pin 13, on MKR1000 on pin 6. LED_BUILTIN is set to
-  the correct LED pin independent of which board is used.
-  If you want to know what pin the on-board LED is connected to on your Arduino
-  model, check the Technical Specs of your board at:
-  https://www.arduino.cc/en/Main/Products
-
-  modified 8 May 2014
-  by Scott Fitzgerald
-  modified 2 Sep 2016
-  by Arturo Guadalupi
-  modified 8 Sep 2016
-  by Colby Newman
-
-  This example code is in the public domain.
-
-  https://www.arduino.cc/en/Tutorial/BuiltInExamples/Blink
-*/
-
-#include <Arduino.h>
-
-/* This example shows how to blink the three user LEDs
-on the A-Star 32U4. */
-
+#include <Servo.h>
 #include <AStar32U4.h>
+#include <PololuRPiSlave.h>
+
+/* This example program shows how to make the A-Star 32U4 Robot
+ * Controller into a Raspberry Pi I2C slave.  The RPi and A-Star can
+ * exchange data bidirectionally, allowing each device to do what it
+ * does best: high-level programming can be handled in a language such
+ * as Python on the RPi, while the A-Star takes charge of motor
+ * control, analog inputs, and other low-level I/O.
+ *
+ * The example and libraries are available for download at:
+ *
+ * https://github.com/pololu/pololu-rpi-slave-arduino-library
+ *
+ * You will need the corresponding Raspberry Pi code, which is
+ * available in that repository under the pi/ subfolder.  The Pi code
+ * sets up a simple Python-based web application as a control panel
+ * for your Raspberry Pi robot.
+ */
+
+// Custom data structure that we will use for interpreting the buffer.
+// We recommend keeping this under 64 bytes total.  If you change the
+// data format, make sure to update the corresponding code in
+// a_star.py on the Raspberry Pi.
+
+struct Data
+{
+  bool yellow, green, red;
+  bool buttonA, buttonB, buttonC;
+
+  int16_t leftMotor, rightMotor;
+  uint16_t batteryMillivolts;
+  uint16_t analog[6];
+
+  bool playNotes;
+  char notes[14];
+  
+  // Encoders are unused in this example.
+  int16_t leftEncoder, rightEncoder;
+};
+
+PololuRPiSlave<struct Data,5> slave;
+PololuBuzzer buzzer;
+AStar32U4Motors motors;
+AStar32U4ButtonA buttonA;
+AStar32U4ButtonB buttonB;
+AStar32U4ButtonC buttonC;
 
 void setup()
 {
+  // Set up the slave at I2C address 20.
+  slave.init(20);
 
+  // Play startup sound.
+  buzzer.play("v10>>g16>>>c16");
 }
 
 void loop()
 {
-  // Turn the LEDs on.
-  ledRed(1);
-  ledYellow(1);
-  ledGreen(1);
+  // Call updateBuffer() before using the buffer, to get the latest
+  // data including recent master writes.
+  slave.updateBuffer();
 
-  // Wait for a second.
-  delay(1000);
+  // Write various values into the data structure.
+  slave.buffer.buttonA = buttonA.isPressed();
+  slave.buffer.buttonB = buttonB.isPressed();
+  slave.buffer.buttonC = buttonC.isPressed();
 
-  // Turn the LEDs off.
-  ledRed(0);
-  ledYellow(0);
-  ledGreen(0);
+  // Change this to readBatteryMillivoltsLV() for the LV model.
+  slave.buffer.batteryMillivolts = readBatteryMillivoltsSV();
 
-  // Wait for a second.
-  delay(1000);
+  for(uint8_t i=0; i<6; i++)
+  {
+    slave.buffer.analog[i] = analogRead(i);
+  }
+
+  // READING the buffer is allowed before or after finalizeWrites().
+  ledYellow(slave.buffer.yellow);
+  ledGreen(slave.buffer.green);
+  ledRed(slave.buffer.red);
+  motors.setSpeeds(slave.buffer.leftMotor, slave.buffer.rightMotor);
+
+  // Playing music involves both reading and writing, since we only
+  // want to do it once.
+  static bool startedPlaying = false;
+  
+  if(slave.buffer.playNotes && !startedPlaying)
+  {
+    buzzer.play(slave.buffer.notes);
+    startedPlaying = true;
+  }
+  else if (startedPlaying && !buzzer.isPlaying())
+  {
+    slave.buffer.playNotes = false;
+    startedPlaying = false;
+  }
+
+  // When you are done WRITING, call finalizeWrites() to make modified
+  // data available to I2C master.
+  slave.finalizeWrites();
 }
